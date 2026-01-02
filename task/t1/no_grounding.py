@@ -3,6 +3,8 @@ from typing import Any
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import AzureChatOpenAI
 from pydantic import SecretStr
+from sqlalchemy.dialects.oracle.dictionary import all_users
+
 from task._constants import DIAL_URL, API_KEY
 from task.user_client import UserClient
 
@@ -58,6 +60,8 @@ class TokenTracker:
 # 1. Create AzureChatOpenAI client
 #    hint: api_version set as empty string if you gen an error that indicated that api_version cannot be None
 # 2. Create TokenTracker
+azure_client = AzureChatOpenAI(deployment_name="gpt-4o", azure_endpoint=DIAL_URL, api_key=SecretStr(API_KEY), api_version="")
+token_tracker = TokenTracker()
 
 def join_context(context: list[dict[str, Any]]) -> str:
     #TODO:
@@ -67,7 +71,13 @@ def join_context(context: list[dict[str, Any]]) -> str:
     #   name: John
     #   surname: Doe
     #   ...
-    raise NotImplementedError
+    joined_context = ""
+    for user in context:
+        joined_context += "User:\n"
+        for key, value in user.items():
+            joined_context += f"{key}: {value}\n"
+
+    return joined_context
 
 
 async def generate_response(system_prompt: str, user_message: str) -> str:
@@ -80,7 +90,12 @@ async def generate_response(system_prompt: str, user_message: str) -> str:
     # 4. Add tokens to `token_tracker`
     # 5. Print response content and `total_tokens`
     # 5. return response content
-    raise NotImplementedError
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=user_message)]
+    response = await azure_client.ainvoke(messages)
+    token_usage = response.usage_metadata
+    total_tokens = token_usage.get("total_tokens", 0)
+    token_tracker.add_tokens(total_tokens)
+    return response.content
 
 
 async def main():
@@ -108,7 +123,28 @@ async def main():
         #           - User prompt: you need to make augmentation of retrieved result and user question
         # 6. Otherwise prin the info that `No users found matching`
         # 7. In the end print info about usage, you will be impressed of how many tokens you have used. (imagine if we have 10k or 100k users 😅)
-    raise NotImplementedError
+        client_manger = UserClient()
+        all_users = client_manger.get_all_users()
+        user_batches = [all_users[i:i + 100] for i in range(0, len(all_users), 100)]
+        tasks = []
+        for batch in user_batches:
+            context = join_context(batch)
+            user_prompt = USER_PROMPT.format(context=context, query=user_question)
+            tasks.append(generate_response(BATCH_SYSTEM_PROMPT, user_prompt))
+        batch_results = await asyncio.gather(*tasks)
+        filtered_results = [result for result in batch_results if result != "NO_MATCHES_FOUND"]
+        if filtered_results:
+            combined_results = "\n\n".join(filtered_results)
+            final_user_prompt = f'## SEARCH RESULTS:\n{combined_results}\n\n## ORIGINAL QUERY:\n{user_question}'
+            final_response = await generate_response(FINAL_SYSTEM_PROMPT, final_user_prompt)
+            print("\n--- Final Search Results ---")
+            print(final_response)
+        else:
+            print("No users found matching the criteria.")
+
+        usage_summary = token_tracker.get_summary()
+        print("\n--- Usage Summary ---")
+        print(f"Total Tokens Used: {usage_summary['total_tokens']}")
 
 
 if __name__ == "__main__":
